@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Доступ в интернет для поиска и скачивания музыки -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    
+    <!-- Разрешение для записи файлов на старых версиях Android (API 28 и ниже) -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="Бабушкина Музыка"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Material3.DayNight.NoActionBar">
+        
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="Бабушкина Музыка"
+            android:theme="@style/Theme.Material3.DayNight.NoActionBar">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>
