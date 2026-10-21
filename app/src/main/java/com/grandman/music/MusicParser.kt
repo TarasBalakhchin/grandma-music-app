@@ -27,8 +27,6 @@ object MusicParser {
                 val title = item.selectFirst(".track__title")?.text()?.trim() ?: continue
                 val artist = item.selectFirst(".track__desc")?.text()?.trim() ?: "Неизвестен"
                 val duration = item.selectFirst(".track__fulltime")?.text()?.trim() ?: ""
-                
-                // absUrl("href") гарантирует полную ссылку с https://...
                 val mp3Url = item.selectFirst("a.track__download-btn")?.absUrl("href") ?: continue
 
                 if (mp3Url.startsWith("http")) {
@@ -43,7 +41,7 @@ object MusicParser {
             e.printStackTrace()
         }
 
-        // ПОПЫТКА 2: Резервный сайт (Musify / Zvukogram / Muzofond)
+        // ПОПЫТКА 2: Резервный сайт (Musify)
         try {
             val searchUrl2 = "https://musify.club/search?searchText=$encodedQuery"
             val doc2 = Jsoup.connect(searchUrl2)
@@ -57,10 +55,10 @@ object MusicParser {
 
             for (item in items2) {
                 val artist = item.selectFirst(".playlist__heading a")?.text()?.trim() ?: "Неизвестен"
-                val title = item.selectFirst(".playlist__heading a.strong")?.text()?.trim() 
+                val title = item.selectFirst(".playlist__heading a.strong")?.text()?.trim()
                     ?: item.selectFirst(".playlist__control")?.attr("data-name") ?: continue
                 val duration = item.selectFirst(".playlist__details .text-muted")?.text()?.trim() ?: ""
-                
+
                 val mp3Url = item.selectFirst("a[href$=.mp3]")?.absUrl("href")
                     ?: item.selectFirst(".playlist__actions a")?.absUrl("href")
                     ?: continue
