@@ -14,14 +14,19 @@ object MusicDownloader {
                 .replace(Regex("[\\\\/:*?\"<>|]"), "")
                 .take(80) + ".mp3"
 
-            val request = DownloadManager.Request(Uri.parse(track.downloadUrl)).apply {
+            val uri = Uri.parse(track.downloadUrl)
+            val referer = "${uri.scheme}://${uri.host}/"
+
+            val request = DownloadManager.Request(uri).apply {
                 setTitle(track.title)
                 setDescription("Скачивание песни: ${track.artist}")
+                
+                // Обязательно маскируемся под браузер, иначе музыкальный сайт заблокирует скачивание!
+                addRequestHeader("User-Agent", MusicParser.USER_AGENT)
+                addRequestHeader("Referer", referer)
+                
                 setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                
-                // Сохранение во внешнюю папку приложения (без запроса разрешений)
                 setDestinationInExternalFilesDir(context, Environment.DIRECTORY_MUSIC, safeFileName)
-                
                 setAllowedOverMetered(true)
                 setAllowedOverRoaming(true)
             }
@@ -31,7 +36,8 @@ object MusicDownloader {
 
             Toast.makeText(context, "Песня скачивается! Она появится в разделе «Мои песни».", Toast.LENGTH_LONG).show()
         } catch (e: Exception) {
-            Toast.makeText(context, "Ошибка при скачивании.", Toast.LENGTH_LONG).show()
+            e.printStackTrace()
+            Toast.makeText(context, "Ошибка: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
         }
     }
 
