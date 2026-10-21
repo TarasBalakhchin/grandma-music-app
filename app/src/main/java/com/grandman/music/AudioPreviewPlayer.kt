@@ -1,12 +1,15 @@
 package com.grandman.music
 
+import android.content.Context
 import android.media.AudioAttributes
 import android.media.MediaPlayer
+import android.net.Uri
 
 class AudioPreviewPlayer {
     private var mediaPlayer: MediaPlayer? = null
 
     fun playOrStop(
+        context: Context,
         source: String,
         onBuffering: () -> Unit = {},
         onPlaying: () -> Unit,
@@ -25,7 +28,19 @@ class AudioPreviewPlayer {
                     .build()
             )
             try {
-                setDataSource(source)
+                if (source.startsWith("http")) {
+                    // Если это ссылка из интернета — передаем заголовки браузера!
+                    val uri = Uri.parse(source)
+                    val headers = mapOf(
+                        "User-Agent" to MusicParser.USER_AGENT,
+                        "Referer" to "${uri.scheme}://${uri.host}/"
+                    )
+                    setDataSource(context, uri, headers)
+                } else {
+                    // Если это уже скачанный файл на телефоне
+                    setDataSource(source)
+                }
+
                 prepareAsync()
 
                 setOnPreparedListener {
