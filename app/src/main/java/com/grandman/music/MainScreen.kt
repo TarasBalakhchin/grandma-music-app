@@ -32,6 +32,7 @@ fun GrandmaMusicApp() {
     var searchQuery by remember { mutableStateOf("") }
     var tracks by remember { mutableStateOf<List<Track>>(emptyList()) }
     var isLoading by remember { mutableStateOf(false) }
+    val downloadingUrls = remember { mutableStateListOf<String>() }
     val downloadedUrls = remember { mutableStateListOf<String>() }
 
     var localTracks by remember { mutableStateOf<List<LocalTrack>>(emptyList()) }
@@ -52,6 +53,7 @@ fun GrandmaMusicApp() {
         }
         val trackToPlay = localTracks[index]
         audioPlayer.playOrStop(
+            context = context,
             source = trackToPlay.filePath,
             onPlaying = {
                 isBufferingSource = null
@@ -67,7 +69,7 @@ fun GrandmaMusicApp() {
             },
             onError = {
                 currentlyPlayingSource = null
-                Toast.makeText(context, "Файл еще скачивается...", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "Не удалось открыть файл", Toast.LENGTH_SHORT).show()
             }
         )
     }
@@ -178,6 +180,7 @@ fun GrandmaMusicApp() {
             } else {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(16.dp), modifier = Modifier.fillMaxSize()) {
                     items(tracks) { track ->
+                        val isDownloading = downloadingUrls.contains(track.downloadUrl)
                         val isAlreadyDownloaded = downloadedUrls.contains(track.downloadUrl)
                         val isPlaying = currentlyPlayingSource == track.downloadUrl
                         val isBuffering = isBufferingSource == track.downloadUrl
@@ -199,6 +202,7 @@ fun GrandmaMusicApp() {
                                             isBufferingSource = null
                                         } else {
                                             audioPlayer.playOrStop(
+                                                context = context,
                                                 source = track.downloadUrl,
                                                 onBuffering = {
                                                     currentlyPlayingSource = null
@@ -248,21 +252,34 @@ fun GrandmaMusicApp() {
                                             audioPlayer.stop()
                                             currentlyPlayingSource = null
                                         }
-                                        downloadedUrls.add(track.downloadUrl)
-                                        MusicDownloader.downloadMp3(context, track)
+                                        downloadingUrls.add(track.downloadUrl)
+                                        scope.launch {
+                                            val success = MusicDownloader.downloadMp3Direct(context, track)
+                                            downloadingUrls.remove(track.downloadUrl)
+                                            if (success) {
+                                                downloadedUrls.add(track.downloadUrl)
+                                                Toast.makeText(context, "Песня сохранена в «Мои песни»!", Toast.LENGTH_LONG).show()
+                                            } else {
+                                                Toast.makeText(context, "Не удалось скачать этот файл, попробуйте другой вариант ниже.", Toast.LENGTH_LONG).show()
+                                            }
+                                        }
                                     },
-                                    enabled = !isAlreadyDownloaded,
+                                    enabled = !isAlreadyDownloaded && !isDownloading,
                                     colors = ButtonDefaults.buttonColors(
                                         containerColor = Color(0xFF2E7D32),
-                                        disabledContainerColor = Color(0xFFA5D6A7)
+                                        disabledContainerColor = if (isDownloading) Color(0xFFFFB74D) else Color(0xFFA5D6A7)
                                     ),
                                     modifier = Modifier.fillMaxWidth().height(56.dp)
                                 ) {
                                     Text(
-                                        text = if (isAlreadyDownloaded) "✓ СКАЧАНО" else "⬇ СКАЧАТЬ В ТЕЛЕФОН",
+                                        text = when {
+                                            isDownloading -> "⏳ СКАЧИВАЕМ... ЖДИТЕ"
+                                            isAlreadyDownloaded -> "✓ УЖЕ В «МОИХ ПЕСНЯХ»"
+                                            else -> "⬇ СКАЧАТЬ В ТЕЛЕФОН"
+                                        },
                                         fontSize = 19.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = if (isAlreadyDownloaded) Color.Black else Color.White
+                                        color = if (isAlreadyDownloaded || isDownloading) Color.Black else Color.White
                                     )
                                 }
                             }
