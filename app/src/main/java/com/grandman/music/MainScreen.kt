@@ -331,7 +331,7 @@ fun GrandmaMusicApp() {
                                                 audioPlayer.stop()
                                                 currentlyPlayingSource = null
                                             }
-                                            MusicDownloader.deleteTrack(localTrack)
+                                            MusicDownloader.deleteTrack(context, localTrack)
                                             localTracks = MusicDownloader.getDownloadedTracks(context)
                                         },
                                         modifier = Modifier.height(56.dp)
