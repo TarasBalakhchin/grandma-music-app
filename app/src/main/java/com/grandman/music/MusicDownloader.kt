@@ -1,6 +1,5 @@
 package com.grandman.music
 
-import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.media.MediaScannerConnection
@@ -17,19 +16,36 @@ import java.net.URL
 object MusicDownloader {
 
     private const val FOLDER_NAME = "GranyMusic"
+    private const val PREFS_NAME = "grandma_music_prefs"
+    private const val KEY_PLAYLIST_ORDER = "playlist_order"
 
-    // Скачивание напрямую в публичную папку Music/GranyMusic
+    // Формируем чистое имя файла без расширения
+    fun getSafeTrackTitle(track: Track): String {
+        return "${track.artist} - ${track.title}"
+            .replace(Regex("[\\\\/:*?\"<>|]"), "")
+            .trim()
+            .take(80)
+    }
+
+    // Проверяем, есть ли уже такая песня в папке GranyMusic
+    fun isTrackAlreadyExists(context: Context, track: Track): Boolean {
+        val expectedTitle = getSafeTrackTitle(track).lowercase()
+        return getDownloadedTracks(context).any { it.title.lowercase() == expectedTitle }
+    }
+
     suspend fun downloadMp3Direct(context: Context, track: Track): Boolean = withContext(Dispatchers.IO) {
         try {
-            val safeFileName = "${track.artist} - ${track.title}"
-                .replace(Regex("[\\\\/:*?\"<>|]"), "")
-                .take(80) + ".mp3"
+            // Защита от задвоения: если песня уже лежит в папке, не качаем её заново
+            if (isTrackAlreadyExists(context, track)) {
+                return@withContext true
+            }
+
+            val safeFileName = getSafeTrackTitle(track) + ".mp3"
 
             var currentUrl = track.downloadUrl
             var redirects = 0
             var connection: HttpURLConnection
 
-            // Проходим все редиректы музыкального сайта
             while (true) {
                 val url = URL(currentUrl)
                 connection = (url.openConnection() as HttpURLConnection).apply {
@@ -57,7 +73,6 @@ object MusicDownloader {
             }
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                // Для Android 10+ (API 29+): пишем в публичную Music/GranyMusic через MediaStore без разрешений!
                 val resolver = context.contentResolver
                 val contentValues = ContentValues().apply {
                     put(MediaStore.Audio.Media.DISPLAY_NAME, safeFileName)
@@ -82,7 +97,6 @@ object MusicDownloader {
                 resolver.update(uri, contentValues, null, null)
 
             } else {
-                // Для старых Android (9 и ниже): пишем напрямую в /storage/emulated/0/Music/GranyMusic
                 val publicMusicDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
                 val grannyDir = File(publicMusicDir, FOLDER_NAME)
                 if (!grannyDir.exists()) {
@@ -96,7 +110,6 @@ object MusicDownloader {
                     }
                 }
 
-                // Сообщаем AIMP и системному плееру о новом файле
                 MediaScannerConnection.scanFile(
                     context,
                     arrayOf(outputFile.absolutePath),
@@ -112,76 +125,106 @@ object MusicDownloader {
         }
     }
 
-    // Читаем все песни из публичной папки Music/GranyMusic для вкладки «Мои песни»
+    // Читаем все песни из Music/GranyMusic (и через MediaStore, и напрямую из папки, убирая дубли)
     fun getDownloadedTracks(context: Context): List<LocalTrack> {
-        val tracks = mutableListOf<LocalTrack>()
+        val trackMap = linkedMapOf<String, LocalTrack>()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val resolver = context.contentResolver
-            val projection = arrayOf(
-                MediaStore.Audio.Media._ID,
-                MediaStore.Audio.Media.DISPLAY_NAME,
-                MediaStore.Audio.Media.DATA
-            )
-            val selection = "${MediaStore.Audio.Media.RELATIVE_PATH} LIKE ?"
-            val selectionArgs = arrayOf("%$FOLDER_NAME%")
-            val sortOrder = "${MediaStore.Audio.Media.DATE_ADDED} DESC"
-
-            resolver.query(
-                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
-                projection,
-                selection,
-                selectionArgs,
-                sortOrder
-            )?.use { cursor ->
-                val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME)
-                val dataCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATA)
-
-                while (cursor.moveToNext()) {
-                    val fileName = cursor.getString(nameCol) ?: continue
-                    val filePath = cursor.getString(dataCol) ?: continue
-                    val file = File(filePath)
-                    if (file.exists()) {
-                        tracks.add(
-                            LocalTrack(
-                                title = fileName.removeSuffix(".mp3"),
-                                filePath = filePath,
-                                file = file
-                            )
+        // 1. Сначала проверяем саму папку напрямую
+        try {
+            val publicMusicDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
+            val grannyDir = File(publicMusicDir, FOLDER_NAME)
+            if (grannyDir.exists()) {
+                val files = grannyDir.listFiles { file ->
+                    file.isFile && file.extension.equals("mp3", ignoreCase = true) && file.length() > 10_000
+                }
+                files?.sortedByDescending { it.lastModified() }?.forEach { file ->
+                    // Убираем технические суффиксы вроде " (1)", если Android когда-то создал дубль
+                    val cleanTitle = file.nameWithoutExtension.replace(Regex("\\s*\\(\\d+\\)$"), "")
+                    if (!trackMap.containsKey(cleanTitle.lowercase())) {
+                        trackMap[cleanTitle.lowercase()] = LocalTrack(
+                            title = cleanTitle,
+                            filePath = file.absolutePath,
+                            file = file
                         )
                     }
                 }
             }
-        } else {
-            val publicMusicDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
-            val grannyDir = File(publicMusicDir, FOLDER_NAME)
-            val files = grannyDir.listFiles { file ->
-                file.isFile && file.extension.equals("mp3", ignoreCase = true) && file.length() > 10_000
-            } ?: return emptyList()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
 
-            return files.sortedByDescending { it.lastModified() }.map { file ->
-                LocalTrack(
-                    title = file.nameWithoutExtension,
-                    filePath = file.absolutePath,
-                    file = file
+        // 2. Дополняем через MediaStore (для Android 10+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                val resolver = context.contentResolver
+                val projection = arrayOf(
+                    MediaStore.Audio.Media.DISPLAY_NAME,
+                    MediaStore.Audio.Media.DATA
                 )
+                val selection = "${MediaStore.Audio.Media.RELATIVE_PATH} LIKE ?"
+                val selectionArgs = arrayOf("%$FOLDER_NAME%")
+                val sortOrder = "${MediaStore.Audio.Media.DATE_ADDED} DESC"
+
+                resolver.query(
+                    MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                    projection,
+                    selection,
+                    selectionArgs,
+                    sortOrder
+                )?.use { cursor ->
+                    val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME)
+                    val dataCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATA)
+
+                    while (cursor.moveToNext()) {
+                        val fileName = cursor.getString(nameCol) ?: continue
+                        val filePath = cursor.getString(dataCol) ?: continue
+                        val file = File(filePath)
+                        if (file.exists()) {
+                            val cleanTitle = fileName.removeSuffix(".mp3").replace(Regex("\\s*\\(\\d+\\)$"), "")
+                            if (!trackMap.containsKey(cleanTitle.lowercase())) {
+                                trackMap[cleanTitle.lowercase()] = LocalTrack(
+                                    title = cleanTitle,
+                                    filePath = filePath,
+                                    file = file
+                                )
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
         }
 
-        return tracks
+        val allTracks = trackMap.values.toList()
+        return applySavedOrder(context, allTracks)
     }
 
-    // Удаление песни из папки GranyMusic
+    // Сохраняем порядок очереди после перетаскивания
+    fun saveTrackOrder(context: Context, tracks: List<LocalTrack>) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val orderString = tracks.joinToString("|||") { it.filePath }
+        prefs.edit().putString(KEY_PLAYLIST_ORDER, orderString).apply()
+    }
+
+    private fun applySavedOrder(context: Context, tracks: List<LocalTrack>): List<LocalTrack> {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val orderString = prefs.getString(KEY_PLAYLIST_ORDER, null) ?: return tracks
+        val savedPaths = orderString.split("|||")
+
+        val orderMap = savedPaths.withIndex().associate { it.value to it.index }
+        return tracks.sortedBy { orderMap[it.filePath] ?: Int.MAX_VALUE }
+    }
+
     fun deleteTrack(context: Context, localTrack: LocalTrack): Boolean {
         return try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val resolver = context.contentResolver
                 val where = "${MediaStore.Audio.Media.DATA} = ?"
                 val args = arrayOf(localTrack.filePath)
-                resolver.delete(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, where, args) > 0
-            } else {
-                localTrack.file.delete()
+                resolver.delete(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, where, args)
             }
+            localTrack.file.delete()
         } catch (e: Exception) {
             localTrack.file.delete()
         }
