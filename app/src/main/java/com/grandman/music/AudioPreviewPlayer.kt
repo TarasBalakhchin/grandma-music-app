@@ -14,12 +14,13 @@ import java.net.URL
 class AudioPreviewPlayer {
     private var mediaPlayer: MediaPlayer? = null
     private val scope = CoroutineScope(Dispatchers.Main)
+    private var isPrepared = false
 
     fun playOrStop(
         context: Context,
         source: String,
         onBuffering: () -> Unit = {},
-        onPlaying: () -> Unit,
+        onPlaying: (durationMs: Int) -> Unit,
         onStopped: () -> Unit,
         onCompleted: () -> Unit = { onStopped() },
         onError: () -> Unit
@@ -28,7 +29,6 @@ class AudioPreviewPlayer {
         onBuffering()
 
         scope.launch {
-            // Если это интернет-ссылка, сначала узнаем конечный URL после редиректов
             val finalSource = if (source.startsWith("http")) {
                 resolveFinalUrl(source)
             } else {
@@ -56,24 +56,75 @@ class AudioPreviewPlayer {
 
                     prepareAsync()
 
-                    setOnPreparedListener {
-                        start()
-                        onPlaying()
+                    setOnPreparedListener { mp ->
+                        isPrepared = true
+                        mp.start()
+                        onPlaying(mp.duration.coerceAtLeast(0))
                     }
 
                     setOnCompletionListener {
+                        isPrepared = false
                         onCompleted()
                     }
 
                     setOnErrorListener { _, _, _ ->
+                        isPrepared = false
                         onError()
                         true
                     }
                 } catch (e: Exception) {
                     e.printStackTrace()
+                    isPrepared = false
                     onError()
                 }
             }
+        }
+    }
+
+    fun pause() {
+        try {
+            if (isPrepared && mediaPlayer?.isPlaying == true) {
+                mediaPlayer?.pause()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun resume() {
+        try {
+            if (isPrepared && mediaPlayer?.isPlaying == false) {
+                mediaPlayer?.start()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun seekTo(positionMs: Int) {
+        try {
+            if (isPrepared) {
+                val safePos = positionMs.coerceIn(0, getDuration())
+                mediaPlayer?.seekTo(safePos)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun getCurrentPosition(): Int {
+        return try {
+            if (isPrepared) mediaPlayer?.currentPosition ?: 0 else 0
+        } catch (e: Exception) {
+            0
+        }
+    }
+
+    fun getDuration(): Int {
+        return try {
+            if (isPrepared) mediaPlayer?.duration?.coerceAtLeast(0) ?: 0 else 0
+        } catch (e: Exception) {
+            0
         }
     }
 
@@ -109,6 +160,7 @@ class AudioPreviewPlayer {
     }
 
     fun stop() {
+        isPrepared = false
         try {
             mediaPlayer?.let {
                 if (it.isPlaying) it.stop()
