@@ -1,12 +1,16 @@
 package com.grandman.music
 
+import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.speech.RecognizerIntent
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -16,15 +20,19 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-// Форматирование миллисекунд в понятные минуты и секунды (например, 01:25)
 private fun formatTime(ms: Int): String {
     val totalSeconds = (ms / 1000).coerceAtLeast(0)
     val minutes = totalSeconds / 60
@@ -43,15 +51,18 @@ fun GrandmaMusicApp() {
     var tracks by remember { mutableStateOf<List<Track>>(emptyList()) }
     var isLoading by remember { mutableStateOf(false) }
     val downloadingUrls = remember { mutableStateListOf<String>() }
-    val downloadedUrls = remember { mutableStateListOf<String>() }
 
     var localTracks by remember { mutableStateOf<List<LocalTrack>>(emptyList()) }
+
+    // Множество названий песен, которые уже есть в папке GranyMusic (чтобы не качать дважды)
+    val existingTrackTitles = remember(localTracks) {
+        localTracks.map { it.title.lowercase() }.toSet()
+    }
 
     val audioPlayer = remember { AudioPreviewPlayer() }
     var currentlyPlayingSource by remember { mutableStateOf<String?>(null) }
     var isBufferingSource by remember { mutableStateOf<String?>(null) }
 
-    // Состояния для мини-плеера в «Моих песнях»
     var currentLocalIndex by remember { mutableIntStateOf(-1) }
     var isPaused by remember { mutableStateOf(false) }
     var currentPositionMs by remember { mutableIntStateOf(0) }
@@ -59,11 +70,35 @@ fun GrandmaMusicApp() {
     var isUserDraggingSlider by remember { mutableStateOf(false) }
     var sliderDragValue by remember { mutableFloatStateOf(0f) }
 
+    // Состояния для перетаскивания песен в очереди
+    var draggedItemIndex by remember { mutableIntStateOf(-1) }
+    var dragOffsetY by remember { mutableFloatStateOf(0f) }
+    val itemHeightPx = with(LocalDensity.current) { 130.dp.toPx() }
+
+    // Разрешение на чтение всех старых песен из папки GranyMusic
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { _ ->
+        localTracks = MusicDownloader.getDownloadedTracks(context)
+    }
+
+    LaunchedEffect(Unit) {
+        val perm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.READ_MEDIA_AUDIO
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+        if (ContextCompat.checkSelfPermission(context, perm) != PackageManager.PERMISSION_GRANTED) {
+            permissionLauncher.launch(perm)
+        } else {
+            localTracks = MusicDownloader.getDownloadedTracks(context)
+        }
+    }
+
     DisposableEffect(Unit) {
         onDispose { audioPlayer.stop() }
     }
 
-    // Таймер обновления ползунка каждые 300 мс, пока играет песня
     LaunchedEffect(currentlyPlayingSource, isPaused, isUserDraggingSlider) {
         while (currentlyPlayingSource != null && !isPaused) {
             if (!isUserDraggingSlider) {
@@ -107,9 +142,11 @@ fun GrandmaMusicApp() {
                 stopAllPlayback()
             },
             onCompleted = {
-                // Автопереход к следующей песне
-                if (index + 1 < localTracks.size) {
-                    playLocalTrackAtIndex(index + 1)
+                // Идем строго по текущей очереди вниз
+                val activeIdx = localTracks.indexOfFirst { it.filePath == currentlyPlayingSource }
+                val nextIdx = if (activeIdx != -1) activeIdx + 1 else index + 1
+                if (nextIdx < localTracks.size) {
+                    playLocalTrackAtIndex(nextIdx)
                 } else {
                     stopAllPlayback()
                 }
@@ -121,6 +158,21 @@ fun GrandmaMusicApp() {
         )
     }
 
+    // Функция перемещения песни в очереди
+    fun moveTrackInQueue(fromIndex: Int, toIndex: Int) {
+        if (fromIndex !in localTracks.indices || toIndex !in localTracks.indices || fromIndex == toIndex) return
+        val mutable = localTracks.toMutableList()
+        val item = mutable.removeAt(fromIndex)
+        mutable.add(toIndex, item)
+        localTracks = mutable
+        MusicDownloader.saveTrackOrder(context, mutable)
+
+        // Обновляем индекс играющей песни, чтобы очередь не сбилась
+        if (currentlyPlayingSource != null) {
+            currentLocalIndex = localTracks.indexOfFirst { it.filePath == currentlyPlayingSource }
+        }
+    }
+
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         // ВЕРХНИЕ ВКЛАДКИ
         Row(
@@ -130,6 +182,7 @@ fun GrandmaMusicApp() {
             Button(
                 onClick = {
                     stopAllPlayback()
+                    localTracks = MusicDownloader.getDownloadedTracks(context)
                     currentTab = 0
                 },
                 colors = ButtonDefaults.buttonColors(
@@ -151,7 +204,7 @@ fun GrandmaMusicApp() {
                 ),
                 modifier = Modifier.weight(1f).height(64.dp)
             ) {
-                Text("🎵 МОИ ПЕСНИ", fontSize = 19.sp, fontWeight = FontWeight.Bold, color = if (currentTab == 1) Color.White else Color.Black)
+                Text("🎵 МОИ ПЕСНИ (${localTracks.size})", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = if (currentTab == 1) Color.White else Color.Black)
             }
         }
 
@@ -162,6 +215,7 @@ fun GrandmaMusicApp() {
                     stopAllPlayback()
                     isLoading = true
                     scope.launch {
+                        localTracks = MusicDownloader.getDownloadedTracks(context)
                         tracks = MusicParser.searchTracks(query)
                         isLoading = false
                     }
@@ -225,8 +279,9 @@ fun GrandmaMusicApp() {
             } else {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(16.dp), modifier = Modifier.fillMaxSize()) {
                     items(tracks) { track ->
+                        val expectedTitle = MusicDownloader.getSafeTrackTitle(track).lowercase()
                         val isDownloading = downloadingUrls.contains(track.downloadUrl)
-                        val isAlreadyDownloaded = downloadedUrls.contains(track.downloadUrl)
+                        val isAlreadyInFolder = existingTrackTitles.contains(expectedTitle)
                         val isPlaying = currentlyPlayingSource == track.downloadUrl
                         val isBuffering = isBufferingSource == track.downloadUrl
 
@@ -304,14 +359,15 @@ fun GrandmaMusicApp() {
                                             val success = MusicDownloader.downloadMp3Direct(context, track)
                                             downloadingUrls.remove(track.downloadUrl)
                                             if (success) {
-                                                downloadedUrls.add(track.downloadUrl)
+                                                // Сразу обновляем список из папки GranyMusic
+                                                localTracks = MusicDownloader.getDownloadedTracks(context)
                                                 Toast.makeText(context, "Песня сохранена в «Мои песни»!", Toast.LENGTH_LONG).show()
                                             } else {
                                                 Toast.makeText(context, "Не удалось скачать этот файл, попробуйте другой вариант ниже.", Toast.LENGTH_LONG).show()
                                             }
                                         }
                                     },
-                                    enabled = !isAlreadyDownloaded && !isDownloading,
+                                    enabled = !isAlreadyInFolder && !isDownloading,
                                     colors = ButtonDefaults.buttonColors(
                                         containerColor = Color(0xFF2E7D32),
                                         disabledContainerColor = if (isDownloading) Color(0xFFFFB74D) else Color(0xFFA5D6A7)
@@ -321,12 +377,12 @@ fun GrandmaMusicApp() {
                                     Text(
                                         text = when {
                                             isDownloading -> "⏳ СКАЧИВАЕМ... ЖДИТЕ"
-                                            isAlreadyDownloaded -> "✓ УЖЕ В «МОИХ ПЕСНЯХ»"
+                                            isAlreadyInFolder -> "✓ УЖЕ В «МОИХ ПЕСНЯХ»"
                                             else -> "⬇ СКАЧАТЬ В ТЕЛЕФОН"
                                         },
                                         fontSize = 19.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = if (isAlreadyDownloaded || isDownloading) Color.Black else Color.White
+                                        color = if (isAlreadyInFolder || isDownloading) Color.Black else Color.White
                                     )
                                 }
                             }
@@ -336,30 +392,141 @@ fun GrandmaMusicApp() {
             }
         }
 
-        // ВКЛАДКА 1: МОИ ПЕСНИ + ПЛЕЕР С ПЕРЕМОТКОЙ
+        // ВКЛАДКА 1: МОИ ПЕСНИ (ОЧЕРЕДЬ, ПЕРЕТАСКИВАНИЕ, СЛУЧАЙНО, ПЛЕЕР)
         if (currentTab == 1) {
             if (localTracks.isEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("У вас пока нет скачанных песен.\nПерейдите в «ПОИСК» сверху.", fontSize = 22.sp, fontWeight = FontWeight.Medium)
+                    Text("В папке GranyMusic пока нет песен.\nПерейдите в «ПОИСК» сверху.", fontSize = 22.sp, fontWeight = FontWeight.Medium)
                 }
             } else {
                 Column(modifier = Modifier.fillMaxSize()) {
-                    // Список скачанных песен
+                    // Кнопка «СЛУЧАЙНО» (перемешивает очередь и запускает с первой песни)
+                    Button(
+                        onClick = {
+                            val shuffled = localTracks.shuffled()
+                            localTracks = shuffled
+                            MusicDownloader.saveTrackOrder(context, shuffled)
+                            playLocalTrackAtIndex(0)
+                            Toast.makeText(context, "Песни перемешаны!", Toast.LENGTH_SHORT).show()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7B1FA2)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(56.dp)
+                    ) {
+                        Text("🔀 ВКЛЮЧИТЬ СЛУЧАЙНО (ПЕРЕМЕШАТЬ)", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    }
+
+                    Text(
+                        text = "Удерживайте значок ☰ или жмите ⬆⬇, чтобы менять очередь:",
+                        fontSize = 15.sp,
+                        color = Color.DarkGray,
+                        modifier = Modifier.padding(vertical = 8.dp)
+                    )
+
+                    // Список песен с перетаскиванием
                     LazyColumn(
-                        verticalArrangement = Arrangement.spacedBy(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
                         modifier = Modifier.weight(1f).fillMaxWidth()
                     ) {
-                        itemsIndexed(localTracks) { index, localTrack ->
+                        itemsIndexed(localTracks, key = { _, item -> item.filePath }) { index, localTrack ->
                             val isThisTrackActive = currentlyPlayingSource == localTrack.filePath
+                            val isBeingDragged = draggedItemIndex == index
 
                             Card(
-                                elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
+                                elevation = CardDefaults.cardElevation(defaultElevation = if (isBeingDragged) 12.dp else 4.dp),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = if (isBeingDragged) Color(0xFFFFF9C4) else MaterialTheme.colorScheme.surface
+                                ),
                                 border = if (isThisTrackActive) BorderStroke(3.dp, Color(0xFF2E7D32)) else null,
-                                modifier = Modifier.fillMaxWidth()
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .zIndex(if (isBeingDragged) 1f else 0f)
+                                    .graphicsLayer {
+                                        translationY = if (isBeingDragged) dragOffsetY else 0f
+                                    }
                             ) {
-                                Column(modifier = Modifier.padding(16.dp)) {
-                                    Text(localTrack.title, fontSize = 21.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 12.dp))
+                                Column(modifier = Modifier.padding(14.dp)) {
+                                    // Верхний ряд: ручка перетаскивания ☰ + номер в очереди + название + стрелки ⬆⬇
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        // Ручка для перетаскивания пальцем
+                                        Box(
+                                            contentAlignment = Alignment.Center,
+                                            modifier = Modifier
+                                                .size(48.dp)
+                                                .pointerInput(localTracks.size) {
+                                                    detectDragGestures(
+                                                        onDragStart = {
+                                                            draggedItemIndex = index
+                                                            dragOffsetY = 0f
+                                                        },
+                                                        onDragEnd = {
+                                                            draggedItemIndex = -1
+                                                            dragOffsetY = 0f
+                                                        },
+                                                        onDragCancel = {
+                                                            draggedItemIndex = -1
+                                                            dragOffsetY = 0f
+                                                        },
+                                                        onDrag = { change, dragAmount ->
+                                                            change.consume()
+                                                            dragOffsetY += dragAmount.y
+                                                            val currentIdx = draggedItemIndex
+                                                            if (currentIdx != -1) {
+                                                                if (dragOffsetY > itemHeightPx && currentIdx < localTracks.size - 1) {
+                                                                    moveTrackInQueue(currentIdx, currentIdx + 1)
+                                                                    draggedItemIndex = currentIdx + 1
+                                                                    dragOffsetY -= itemHeightPx
+                                                                } else if (dragOffsetY < -itemHeightPx && currentIdx > 0) {
+                                                                    moveTrackInQueue(currentIdx, currentIdx - 1)
+                                                                    draggedItemIndex = currentIdx - 1
+                                                                    dragOffsetY += itemHeightPx
+                                                                }
+                                                            }
+                                                        }
+                                                    )
+                                                }
+                                        ) {
+                                            Text("☰", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Color(0xFF1565C0))
+                                        }
 
+                                        Text(
+                                            text = "${index + 1}. ${localTrack.title}",
+                                            fontSize = 20.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .padding(horizontal = 8.dp)
+                                        )
+
+                                        // Кнопки точного сдвига вверх/вниз в очереди
+                                        Column {
+                                            OutlinedButton(
+                                                onClick = { moveTrackInQueue(index, index - 1) },
+                                                enabled = index > 0,
+                                                contentPadding = PaddingValues(0.dp),
+                                                modifier = Modifier.size(width = 44.dp, height = 36.dp)
+                                            ) {
+                                                Text("⬆", fontSize = 18.sp)
+                                            }
+                                            Spacer(modifier = Modifier.height(4.dp))
+                                            OutlinedButton(
+                                                onClick = { moveTrackInQueue(index, index + 1) },
+                                                enabled = index < localTracks.size - 1,
+                                                contentPadding = PaddingValues(0.dp),
+                                                modifier = Modifier.size(width = 44.dp, height = 36.dp)
+                                            ) {
+                                                Text("⬇", fontSize = 18.sp)
+                                            }
+                                        }
+                                    }
+
+                                    Spacer(modifier = Modifier.height(10.dp))
+
+                                    // Нижний ряд карточки: Включить/Пауза и Удалить
                                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                                         Button(
                                             onClick = {
@@ -382,7 +549,7 @@ fun GrandmaMusicApp() {
                                                     else -> Color(0xFF2E7D32)
                                                 }
                                             ),
-                                            modifier = Modifier.weight(1f).height(54.dp)
+                                            modifier = Modifier.weight(1f).height(52.dp)
                                         ) {
                                             Text(
                                                 text = when {
@@ -403,7 +570,7 @@ fun GrandmaMusicApp() {
                                                 MusicDownloader.deleteTrack(context, localTrack)
                                                 localTracks = MusicDownloader.getDownloadedTracks(context)
                                             },
-                                            modifier = Modifier.height(54.dp)
+                                            modifier = Modifier.height(52.dp)
                                         ) {
                                             Text("🗑", fontSize = 20.sp, color = Color(0xFFC62828))
                                         }
@@ -413,7 +580,7 @@ fun GrandmaMusicApp() {
                         }
                     }
 
-                    // НИЖНЯЯ ПАНЕЛЬ ПЛЕЕРА С ПЕРЕМОТКОЙ (показывается, когда выбрана песня)
+                    // НИЖНЯЯ ПАНЕЛЬ ПЛЕЕРА С ПЕРЕМОТКОЙ
                     if (currentLocalIndex in localTracks.indices && currentlyPlayingSource != null) {
                         val activeTrack = localTracks[currentLocalIndex]
                         Spacer(modifier = Modifier.height(10.dp))
@@ -426,14 +593,13 @@ fun GrandmaMusicApp() {
                         ) {
                             Column(modifier = Modifier.padding(14.dp)) {
                                 Text(
-                                    text = "Сейчас играет: ${activeTrack.title}",
+                                    text = "Сейчас играет (${currentLocalIndex + 1}/${localTracks.size}): ${activeTrack.title}",
                                     fontSize = 18.sp,
                                     fontWeight = FontWeight.Bold,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
 
-                                // Ползунок перемотки
                                 val maxDuration = totalDurationMs.coerceAtLeast(1).toFloat()
                                 val sliderVal = if (isUserDraggingSlider) {
                                     sliderDragValue
@@ -456,7 +622,6 @@ fun GrandmaMusicApp() {
                                     modifier = Modifier.fillMaxWidth()
                                 )
 
-                                // Время слева и справа под ползунком
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween
@@ -467,7 +632,6 @@ fun GrandmaMusicApp() {
 
                                 Spacer(modifier = Modifier.height(8.dp))
 
-                                // Крупные кнопки управления: -10 сек, Пауза/Плей, +10 сек, Следующая
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -526,7 +690,7 @@ fun GrandmaMusicApp() {
                                             if (currentLocalIndex + 1 < localTracks.size) {
                                                 playLocalTrackAtIndex(currentLocalIndex + 1)
                                             } else {
-                                                playLocalTrackAtIndex(0) // Зацикливаем на первую песню
+                                                playLocalTrackAtIndex(0)
                                             }
                                         },
                                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1565C0)),
