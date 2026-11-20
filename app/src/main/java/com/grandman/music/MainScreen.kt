@@ -22,6 +22,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
@@ -41,8 +42,12 @@ private fun formatTime(ms: Int): String {
 }
 
 @Composable
-fun GrandmaMusicApp() {
+fun GrandmaMusicApp(
+    incomingUrl: String? = null,
+    onIncomingUrlHandled: () -> Unit = {}
+) {
     val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
 
     var currentTab by remember { mutableIntStateOf(0) }
@@ -54,7 +59,6 @@ fun GrandmaMusicApp() {
 
     var localTracks by remember { mutableStateOf<List<LocalTrack>>(emptyList()) }
 
-    // Множество названий песен, которые уже есть в папке GranyMusic (чтобы не качать дважды)
     val existingTrackTitles = remember(localTracks) {
         localTracks.map { it.title.lowercase() }.toSet()
     }
@@ -70,12 +74,10 @@ fun GrandmaMusicApp() {
     var isUserDraggingSlider by remember { mutableStateOf(false) }
     var sliderDragValue by remember { mutableFloatStateOf(0f) }
 
-    // Состояния для перетаскивания песен в очереди
     var draggedItemIndex by remember { mutableIntStateOf(-1) }
     var dragOffsetY by remember { mutableFloatStateOf(0f) }
     val itemHeightPx = with(LocalDensity.current) { 130.dp.toPx() }
 
-    // Разрешение на чтение всех старых песен из папки GranyMusic
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { _ ->
@@ -120,6 +122,43 @@ fun GrandmaMusicApp() {
         totalDurationMs = 0
     }
 
+    // Универсальный поиск: сам определяет, это ссылка TikTok или обычный запрос песни
+    fun performUniversalSearch(rawQuery: String) {
+        val trimmed = rawQuery.trim()
+        if (trimmed.isEmpty()) return
+
+        stopAllPlayback()
+        isLoading = true
+
+        scope.launch {
+            localTracks = MusicDownloader.getDownloadedTracks(context)
+
+            if (TikTokParser.isTikTokUrl(trimmed)) {
+                val tikTokTrack = TikTokParser.fetchAudioFromTikTok(trimmed)
+                if (tikTokTrack != null) {
+                    tracks = listOf(tikTokTrack)
+                } else {
+                    tracks = emptyList()
+                    Toast.makeText(context, "Не удалось получить звук из TikTok. Проверьте ссылку.", Toast.LENGTH_LONG).show()
+                }
+            } else {
+                tracks = MusicParser.searchTracks(trimmed)
+            }
+
+            isLoading = false
+        }
+    }
+
+    // Автоматически запускаем поиск, если ссылку передали из TikTok через «Поделиться» или буфер обмена
+    LaunchedEffect(incomingUrl) {
+        if (!incomingUrl.isNullOrBlank()) {
+            currentTab = 0
+            searchQuery = incomingUrl
+            performUniversalSearch(incomingUrl)
+            onIncomingUrlHandled()
+        }
+    }
+
     fun playLocalTrackAtIndex(index: Int) {
         if (index < 0 || index >= localTracks.size) {
             stopAllPlayback()
@@ -142,7 +181,6 @@ fun GrandmaMusicApp() {
                 stopAllPlayback()
             },
             onCompleted = {
-                // Идем строго по текущей очереди вниз
                 val activeIdx = localTracks.indexOfFirst { it.filePath == currentlyPlayingSource }
                 val nextIdx = if (activeIdx != -1) activeIdx + 1 else index + 1
                 if (nextIdx < localTracks.size) {
@@ -158,7 +196,6 @@ fun GrandmaMusicApp() {
         )
     }
 
-    // Функция перемещения песни в очереди
     fun moveTrackInQueue(fromIndex: Int, toIndex: Int) {
         if (fromIndex !in localTracks.indices || toIndex !in localTracks.indices || fromIndex == toIndex) return
         val mutable = localTracks.toMutableList()
@@ -167,7 +204,6 @@ fun GrandmaMusicApp() {
         localTracks = mutable
         MusicDownloader.saveTrackOrder(context, mutable)
 
-        // Обновляем индекс играющей песни, чтобы очередь не сбилась
         if (currentlyPlayingSource != null) {
             currentLocalIndex = localTracks.indexOfFirst { it.filePath == currentlyPlayingSource }
         }
@@ -176,7 +212,7 @@ fun GrandmaMusicApp() {
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         // ВЕРХНИЕ ВКЛАДКИ
         Row(
-            modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
+            modifier = Modifier.fillMaxWidth().padding(bottom = 14.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Button(
@@ -208,20 +244,8 @@ fun GrandmaMusicApp() {
             }
         }
 
-        // ВКЛАДКА 0: ПОИСК В ИНТЕРНЕТЕ
+        // ВКЛАДКА 0: ПОИСК ПЕСЕН И ЗАГРУЗКА ИЗ TIKTOK
         if (currentTab == 0) {
-            fun performSearch(query: String) {
-                if (query.isNotBlank()) {
-                    stopAllPlayback()
-                    isLoading = true
-                    scope.launch {
-                        localTracks = MusicDownloader.getDownloadedTracks(context)
-                        tracks = MusicParser.searchTracks(query)
-                        isLoading = false
-                    }
-                }
-            }
-
             val voiceLauncher = rememberLauncherForActivityResult(
                 contract = ActivityResultContracts.StartActivityForResult()
             ) { result ->
@@ -229,7 +253,7 @@ fun GrandmaMusicApp() {
                     val spokenText = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
                     if (!spokenText.isNullOrBlank()) {
                         searchQuery = spokenText
-                        performSearch(spokenText)
+                        performUniversalSearch(spokenText)
                     }
                 }
             }
@@ -237,16 +261,19 @@ fun GrandmaMusicApp() {
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = { searchQuery = it },
-                label = { Text("Напишите песню или артиста", fontSize = 18.sp) },
-                textStyle = LocalTextStyle.current.copy(fontSize = 22.sp),
+                label = { Text("Песня, артист или ссылка TikTok", fontSize = 17.sp) },
+                textStyle = LocalTextStyle.current.copy(fontSize = 20.sp),
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true
             )
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Button(onClick = { performSearch(searchQuery) }, modifier = Modifier.weight(1f).height(60.dp)) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(
+                    onClick = { performUniversalSearch(searchQuery) },
+                    modifier = Modifier.weight(1f).height(58.dp)
+                ) {
                     Text("НАЙТИ", fontSize = 20.sp, fontWeight = FontWeight.Bold)
                 }
 
@@ -260,20 +287,39 @@ fun GrandmaMusicApp() {
                         voiceLauncher.launch(intent)
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1976D2)),
-                    modifier = Modifier.weight(1f).height(60.dp)
+                    modifier = Modifier.weight(1f).height(58.dp)
                 ) {
                     Text("🎤 ГОЛОСОМ", fontSize = 18.sp, fontWeight = FontWeight.Bold)
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Кнопка быстрой вставки ссылки из буфера обмена (удобно для TikTok)
+            OutlinedButton(
+                onClick = {
+                    val clipText = clipboardManager.getText()?.text?.trim()
+                    if (!clipText.isNullOrBlank()) {
+                        val cleanUrl = TikTokParser.extractTikTokUrl(clipText) ?: clipText
+                        searchQuery = cleanUrl
+                        performUniversalSearch(cleanUrl)
+                    } else {
+                        Toast.makeText(context, "В буфере обмена пока пусто", Toast.LENGTH_SHORT).show()
+                    }
+                },
+                modifier = Modifier.fillMaxWidth().height(48.dp)
+            ) {
+                Text("📋 ВСТАВИТЬ ССЫЛКУ ИЗ БУФЕРА", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color(0xFF00695C))
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
 
             if (isLoading) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         CircularProgressIndicator(modifier = Modifier.size(64.dp))
                         Spacer(modifier = Modifier.height(16.dp))
-                        Text("Ищем песни, подождите...", fontSize = 22.sp)
+                        Text("Загружаем, подождите...", fontSize = 22.sp)
                     }
                 }
             } else {
@@ -322,7 +368,7 @@ fun GrandmaMusicApp() {
                                                 onError = {
                                                     isBufferingSource = null
                                                     currentlyPlayingSource = null
-                                                    Toast.makeText(context, "Не удалось включить песню", Toast.LENGTH_SHORT).show()
+                                                    Toast.makeText(context, "Не удалось включить звук", Toast.LENGTH_SHORT).show()
                                                 }
                                             )
                                         }
@@ -359,11 +405,10 @@ fun GrandmaMusicApp() {
                                             val success = MusicDownloader.downloadMp3Direct(context, track)
                                             downloadingUrls.remove(track.downloadUrl)
                                             if (success) {
-                                                // Сразу обновляем список из папки GranyMusic
                                                 localTracks = MusicDownloader.getDownloadedTracks(context)
-                                                Toast.makeText(context, "Песня сохранена в «Мои песни»!", Toast.LENGTH_LONG).show()
+                                                Toast.makeText(context, "Сохранено в «Мои песни»!", Toast.LENGTH_LONG).show()
                                             } else {
-                                                Toast.makeText(context, "Не удалось скачать этот файл, попробуйте другой вариант ниже.", Toast.LENGTH_LONG).show()
+                                                Toast.makeText(context, "Не удалось скачать этот файл.", Toast.LENGTH_LONG).show()
                                             }
                                         }
                                     },
@@ -400,7 +445,6 @@ fun GrandmaMusicApp() {
                 }
             } else {
                 Column(modifier = Modifier.fillMaxSize()) {
-                    // Кнопка «СЛУЧАЙНО» (перемешивает очередь и запускает с первой песни)
                     Button(
                         onClick = {
                             val shuffled = localTracks.shuffled()
@@ -424,7 +468,6 @@ fun GrandmaMusicApp() {
                         modifier = Modifier.padding(vertical = 8.dp)
                     )
 
-                    // Список песен с перетаскиванием
                     LazyColumn(
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                         modifier = Modifier.weight(1f).fillMaxWidth()
@@ -447,12 +490,10 @@ fun GrandmaMusicApp() {
                                     }
                             ) {
                                 Column(modifier = Modifier.padding(14.dp)) {
-                                    // Верхний ряд: ручка перетаскивания ☰ + номер в очереди + название + стрелки ⬆⬇
                                     Row(
                                         verticalAlignment = Alignment.CenterVertically,
                                         modifier = Modifier.fillMaxWidth()
                                     ) {
-                                        // Ручка для перетаскивания пальцем
                                         Box(
                                             contentAlignment = Alignment.Center,
                                             modifier = Modifier
@@ -502,7 +543,6 @@ fun GrandmaMusicApp() {
                                                 .padding(horizontal = 8.dp)
                                         )
 
-                                        // Кнопки точного сдвига вверх/вниз в очереди
                                         Column {
                                             OutlinedButton(
                                                 onClick = { moveTrackInQueue(index, index - 1) },
@@ -526,7 +566,6 @@ fun GrandmaMusicApp() {
 
                                     Spacer(modifier = Modifier.height(10.dp))
 
-                                    // Нижний ряд карточки: Включить/Пауза и Удалить
                                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                                         Button(
                                             onClick = {
@@ -580,7 +619,6 @@ fun GrandmaMusicApp() {
                         }
                     }
 
-                    // НИЖНЯЯ ПАНЕЛЬ ПЛЕЕРА С ПЕРЕМОТКОЙ
                     if (currentLocalIndex in localTracks.indices && currentlyPlayingSource != null) {
                         val activeTrack = localTracks[currentLocalIndex]
                         Spacer(modifier = Modifier.height(10.dp))
